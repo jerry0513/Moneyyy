@@ -1,0 +1,39 @@
+name: Run unit tests
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  run-unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set Up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '19'
+          cache: 'gradle'
+
+      - name: Change wrapper permissions
+        run: chmod +x ./gradlew
+
+      - name: Run gradle tests
+        run: ./gradlew test
+
+      - name: Build APK debug
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK debug
+        uses: actions/upload-artifact@v4
+        with:
+          path: app/build/outputs/apk/debug/
+          retention-days: 1
+
+
+
+
+
