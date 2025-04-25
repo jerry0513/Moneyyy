@@ -1,0 +1,67 @@
+name: Android CI
+
+on:
+  push:
+    branches:
+      - 'release/*'
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set Up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '19'
+          cache: 'gradle'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Run Unit Tests
+        run: ./gradlew test
+
+      - name: Bump versionCode & versionName and commit
+        run: |
+          VERSION_FILE=gradle.properties
+          
+          VERSION_CODE=$(grep VERSION_CODE $VERSION_FILE | cut -d'=' -f2)
+          NEW_VERSION_CODE=$((VERSION_CODE + 1))
+          
+          VERSION_NAME=$(grep VERSION_NAME $VERSION_FILE | cut -d'=' -f2)
+          MAJOR=$(echo $VERSION_NAME | cut -d'.' -f1)
+          MINOR=$(echo $VERSION_NAME | cut -d'.' -f2)
+          NEW_MINOR=$((MINOR + 1))
+          NEW_VERSION_NAME="$MAJOR.$NEW_MINOR"
+          
+          sed -i "s/VERSION_CODE=$VERSION_CODE/VERSION_CODE=$NEW_VERSION_CODE/" $VERSION_FILE
+          sed -i "s/VERSION_NAME=$VERSION_NAME/VERSION_NAME=$NEW_VERSION_NAME/" $VERSION_FILE
+          
+          echo "Bumped versionCode to $NEW_VERSION_CODE"
+          echo "Bumped versionName to $NEW_VERSION_NAME"
+          
+          git config --global user.name "github-actions"
+          git config --global user.email "github-actions@github.com"
+          git add gradle.properties
+          git commit -m "chore: bump versionCode to ${NEW_VERSION_CODE}, versionName to ${NEW_VERSION_NAME}"
+          git push
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload to Firebase App Distribution
+        uses: wzieba/Firebase-Distribution-Github-Action@v1
+        with:
+          appId: ${{ secrets.FIREBASE_APP_ID }}
+          serviceCredentialsFileContent: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          groups: testers
+          file: app/build/outputs/apk/debug/app-debug.apk
