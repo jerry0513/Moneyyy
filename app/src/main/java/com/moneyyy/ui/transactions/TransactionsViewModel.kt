@@ -1,0 +1,148 @@
+package com.moneyyy.ui.transactions
+
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.moneyyy.data.database.TransactionEntity
+import com.moneyyy.data.model.CategoryType
+import com.moneyyy.data.model.ExpenseCategory
+import com.moneyyy.data.model.IncomeCategory
+import com.moneyyy.data.repository.TransactionRepository
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import javax.inject.Inject
+
+@HiltViewModel
+class TransactionsViewModel @Inject constructor(
+    private val transactionRepository: TransactionRepository
+) : ViewModel() {
+    private val _uiState = MutableStateFlow(TransactionsUiState(isLoading = true))
+    val uiState: StateFlow<TransactionsUiState>
+        get() = _uiState
+
+    private val _uiEvent = Channel<TransactionsUiEvent>()
+    val uiEvent: Flow<TransactionsUiEvent>
+        get() = _uiEvent.receiveAsFlow()
+
+    private val dateFlow = MutableStateFlow(_uiState.value.info.date)
+
+    init {
+        dateFlow
+            .flatMapLatest { date ->
+                _uiState.update { state ->
+                    state.copy(
+                        info = state.info.copy(date = date),
+                        isLoading = true
+                    )
+                }
+                
+                transactionRepository.observeTransactionsByYearMonth(date.year, date.month)
+                    .flowOn(Dispatchers.IO)
+                    .map { convertToInfo(date, it) }
+            }
+            .onEach { _uiState.value = TransactionsUiState(it) }
+            .launchIn(viewModelScope)
+    }
+
+    fun clickStatistics() {
+        viewModelScope.launch {
+            val date = _uiState.value.info.date
+            _uiEvent.send(TransactionsUiEvent.NavigateToStatistics(date.year, date.month))
+        }
+    }
+
+    fun setDate(year: Int, month: Int) {
+        dateFlow.value = TransactionsDate(year, month)
+    }
+
+    private fun convertToInfo(
+        date: TransactionsDate,
+        transactions: List<TransactionEntity>
+    ): TransactionsScreenInfo {
+        val daily = transactions
+            .groupBy {
+                LocalDate.ofInstant(
+                    Instant.ofEpochMilli(it.timestamp),
+                    ZoneId.systemDefault()
+                )
+                    .format(DateTimeFormatter.ISO_DATE)
+            }
+            .map { (date, transactions) ->
+                TransactionsDaily(
+                    date = date,
+                    summary = transactions
+                        .groupBy { it.categoryType }
+                        .mapValues { (_, list) -> list.sumOf { it.amount } }
+                        .let {
+                            val income = it[CategoryType.INCOME] ?: 0
+                            val expense = it[CategoryType.EXPENSE] ?: 0
+                            TransactionsSummary(income, expense, income - expense)
+                        },
+                    items = transactions.map {
+                        val amountText = it.amount.toString()
+                        TransactionsDailyItem(
+                            id = it.id,
+                            category = when (it.categoryType) {
+                                CategoryType.EXPENSE -> ExpenseCategory.valueOf(it.categoryKey)
+                                CategoryType.INCOME -> IncomeCategory.valueOf(it.categoryKey)
+                            },
+                            note = it.note,
+                            amountText = when (it.categoryType) {
+                                CategoryType.INCOME -> amountText
+                                CategoryType.EXPENSE -> "-$amountText"
+                            }
+                        )
+                    }
+                )
+            }
+
+        val summary = daily.fold(TransactionsSummary(0, 0, 0)) { acc, day ->
+            val income = acc.income + day.summary.income
+            val expense = acc.expense + day.summary.expense
+            TransactionsSummary(
+                income = income,
+                expense = expense,
+                balance = income - expense
+            )
+        }
+
+        return TransactionsScreenInfo(
+            date = date,
+            summary = summary,
+            daily = daily
+        )
+    }
+}
+
+data class TransactionsUiState(
+    val info: TransactionsScreenInfo = TransactionsScreenInfo(
+        date = LocalDate.now().let {
+            TransactionsDate(it.year, it.monthValue)
+        },
+        summary = TransactionsSummary(income = 0, expense = 0, balance = 0),
+        daily = listOf()
+    ),
+    val isLoading: Boolean = false,
+)
+
+sealed class TransactionsUiEvent {
+    data class NavigateToStatistics(
+        val year: Int,
+        val month: Int
+    ) : TransactionsUiEvent()
+}
